@@ -124,7 +124,18 @@ function plates(t){if(t<=BAR)return"empty bar";let rem=(t-BAR)/2;const ps=[45,35
   const ct={};res.forEach(p=>ct[p]=(ct[p]||0)+1);
   return Object.entries(ct).map(([p,c])=>c>1?`${c}×${p}`:`${p}`).join(" + ")+" /side";}
 function loadInfo(w){return w<=BAR?"Empty bar":`${BAR} lb bar + ${plates(w)}`;}
-function buildWarmup(wt){
+function buildWarmup(wt,ex){
+  // Deadlift: can't start from bar (needs plates for floor height), and only 1 working set
+  // so warmup ramp is more important — always use full ramp logic
+  if(ex==="Deadlift"){
+    if(wt<=135)return[];// Already at or below 1 plate, no warmup needed
+    const s=[{weight:135,reps:5}];// Always start at 1 plate (135)
+    const cap=wt*0.85,av=RACK.filter(w=>w>135&&w<=cap);
+    if(!av.length)return s;
+    let pk;if(av.length<=4)pk=av;else{pk=[av[0],av[Math.floor(av.length/3)],av[Math.floor(2*av.length/3)],av[av.length-1]];pk=[...new Set(pk)];}
+    [5,3,2,1].forEach((r,i)=>{if(pk[i])s.push({weight:pk[i],reps:r});});return s;
+  }
+  // All other lifts: standard warmup
   if(wt<=BAR)return[];const s=[{weight:BAR,reps:5}];if(wt<100)return s;
   if(wt<200){const cap=wt*0.75,av=RACK.filter(w=>w>BAR&&w<=cap);
     if(av.length)s.push({weight:av[av.length-1],reps:5});return s;}
@@ -215,7 +226,7 @@ function renderHome(){
     <div class="card">
       <div class="label">NEXT WORKOUT</div>
       <div class="tag" style="margin-bottom:16px">Workout ${wk} — #${S.workoutNumber}</div>
-      ${exs.map(ex=>{const w=S.weights[ex],wu=buildWarmup(w),sr=SETS_REPS[ex];return`
+      ${exs.map(ex=>{const w=S.weights[ex],wu=buildWarmup(w,ex),sr=SETS_REPS[ex];return`
         <div class="row border" style="align-items:flex-start">
           <div style="flex:1">
             <div style="font-size:16px;color:#ddd;font-weight:600">${ex}</div>
@@ -264,7 +275,7 @@ function startWorkout(){exIdx=0;warmupIdx=0;setsLog=[];modal=null;view="workout"
 function renderWorkout(){
   const wk=S.nextWorkout,exs=EXERCISES[wk],curEx=exs[exIdx],workWt=S.weights[curEx];
   const {sets:ts,reps:tr}=SETS_REPS[curEx];
-  const wuSets=buildWarmup(workWt);
+  const wuSets=buildWarmup(workWt,curEx);
   const log=setsLog[exIdx]||{name:curEx,weight:workWt,setsCompleted:[],difficulties:[],warmupSets:wuSets,warmupDone:wuSets.length===0};
   const wuDone=log.warmupDone,wc=log.setsCompleted.length,allDone=exIdx>=exs.length-1&&wc>=ts;
 
@@ -291,7 +302,7 @@ function renderWorkout(){
     </div>
     ${exs.map((ex,ei)=>{const{sets:ets,reps:etr}=SETS_REPS[ex],elog=setsLog[ei],
       edone=elog&&elog.setsCompleted.length>=ets,isCur=ei===exIdx,w=S.weights[ex],
-      ews=buildWarmup(w),ewuD=elog?.warmupDone;
+      ews=buildWarmup(w,ex),ewuD=elog?.warmupDone;
       return`<div class="card ${isCur?'active':edone?'done':''} ${ei>exIdx?'dim':''}">
         <div class="row" style="margin-bottom:8px">
           <div><div class="exname">${ex}</div><div class="exdet">${w} lb — ${ets}×${etr}</div>
@@ -312,7 +323,7 @@ function renderWorkout(){
     ${actionHtml}`;
 }
 
-function showWarmup(){const wk=S.nextWorkout,ex=EXERCISES[wk][exIdx],wt=S.weights[ex],ws=buildWarmup(wt);
+function showWarmup(){const wk=S.nextWorkout,ex=EXERCISES[wk][exIdx],wt=S.weights[ex],ws=buildWarmup(wt,ex);
   mWt=ws[warmupIdx].weight;modal="warmup";render();}
 function showFeedback(){const wk=S.nextWorkout,ex=EXERCISES[wk][exIdx];
   mWt=S.weights[ex];mReps=SETS_REPS[ex].reps;mDiff="ok";modal="feedback";render();}
@@ -403,7 +414,7 @@ function renderTimerModal(){
 // ═══════════════════════════════════════════
 function doneWarmup(){
   const wk=S.nextWorkout,exs=EXERCISES[wk],curEx=exs[exIdx],wt=S.weights[curEx];
-  const ws=buildWarmup(wt),{sets:ts,reps:tr}=SETS_REPS[curEx];
+  const ws=buildWarmup(wt,curEx),{sets:ts,reps:tr}=SETS_REPS[curEx];
   const next=warmupIdx+1;
   modal=null;
   if(next>=ws.length){
@@ -423,7 +434,7 @@ function logWorkSet(){
   const{sets:ts,reps:tr}=SETS_REPS[curEx];
   if(mWt&&mWt!==wt){S.weights[curEx]=mWt;save(S);}
   const effectiveWt=mWt||wt;
-  const ws=buildWarmup(effectiveWt);
+  const ws=buildWarmup(effectiveWt,curEx);
   const log=setsLog[exIdx]||{name:curEx,weight:effectiveWt,setsCompleted:[],difficulties:[],warmupSets:ws,warmupDone:true};
   log.setsCompleted.push(mReps);log.difficulties.push(mDiff);log.weight=effectiveWt;log.warmupDone=true;log.warmupSets=ws;
   setsLog[exIdx]=log;
@@ -433,7 +444,7 @@ function logWorkSet(){
     summaryData={workout:wk,workoutNumber:S.workoutNumber,date:today(),exercises:[...setsLog]};
     view="summary";render();
   } else if(last){
-    const nxi=exIdx+1,nex=exs[nxi],nwt=S.weights[nex],nw=buildWarmup(nwt),nsr=SETS_REPS[nex];
+    const nxi=exIdx+1,nex=exs[nxi],nwt=S.weights[nex],nw=buildWarmup(nwt,nex),nsr=SETS_REPS[nex];
     const hasWu=nw.length>0;
     const ni=hasWu?{exercise:nex,weight:nw[0].weight,reps:nw[0].reps,setLabel:`Warmup 1/${nw.length}`}
       :{exercise:nex,weight:nwt,reps:nsr.reps,setLabel:`Working Set 1/${nsr.sets}`};
