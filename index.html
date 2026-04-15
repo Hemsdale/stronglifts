@@ -92,6 +92,7 @@ textarea{width:100%;min-height:80px;background:#1a1a1a;color:#f4f4f4;border:1px 
 .diflabel{font-size:12px;margin-top:2px}
 .hidden{display:none}
 @media(prefers-color-scheme:dark){:root{color-scheme:dark}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
 </style>
 </head>
 <body>
@@ -125,15 +126,35 @@ function plates(t){if(t<=BAR)return"empty bar";let rem=(t-BAR)/2;const ps=[45,35
   return Object.entries(ct).map(([p,c])=>c>1?`${c}×${p}`:`${p}`).join(" + ")+" /side";}
 function loadInfo(w){return w<=BAR?"Empty bar":`${BAR} lb bar + ${plates(w)}`;}
 function buildWarmup(wt,ex){
-  // Deadlift: can't start from bar (needs plates for floor height), and only 1 working set
-  // so warmup ramp is more important — always use full ramp logic
-  if(ex==="Deadlift"){
-    if(wt<=135)return[];// Already at or below 1 plate, no warmup needed
-    const s=[{weight:135,reps:5}];// Always start at 1 plate (135)
-    const cap=wt*0.85,av=RACK.filter(w=>w>135&&w<=cap);
-    if(!av.length)return s;
-    let pk;if(av.length<=4)pk=av;else{pk=[av[0],av[Math.floor(av.length/3)],av[Math.floor(2*av.length/3)],av[av.length-1]];pk=[...new Set(pk)];}
-    [5,3,2,1].forEach((r,i)=>{if(pk[i])s.push({weight:pk[i],reps:r});});return s;
+  // Deadlift: starts at 135 (needs plates for floor height), only 1×5 working set
+  // Warmup IS your volume. Hit every rack stop, no jumps > ~50lb, reps taper down.
+  if(ex==="Deadlift"||ex==="Barbell Row"){
+    const minStart=ex==="Deadlift"?135:65;// Rows can start lighter
+    if(wt<=minStart)return[];
+    const s=[];
+    // All rack stops from minStart up to (but not including) working weight
+    const stops=RACK.filter(w=>w>=minStart&&w<wt);
+    if(!stops.length){s.push({weight:minStart,reps:5});return s;}
+    // Fill gaps: if any jump between consecutive stops > 50lb, add midpoint
+    const filled=[stops[0]];
+    for(let i=1;i<stops.length;i++){
+      if(stops[i]-filled[filled.length-1]>50){
+        filled.push(r5((filled[filled.length-1]+stops[i])/2));
+      }
+      filled.push(stops[i]);
+    }
+    // Assign reps: position-based taper
+    // Short ramps (1-2 sets): all 5 reps
+    // Longer ramps: 5s early, 3s middle, 2s near working weight
+    filled.forEach((w,i)=>{
+      const remaining=filled.length-i;
+      let reps=5;
+      if(filled.length>=4&&remaining<=2)reps=2;
+      else if(filled.length>=3&&remaining===1)reps=2;
+      else if(filled.length>=3&&remaining<=Math.ceil(filled.length/2))reps=3;
+      s.push({weight:w,reps});
+    });
+    return s;
   }
   // All other lifts: standard warmup
   if(wt<=BAR)return[];const s=[{weight:BAR,reps:5}];if(wt<100)return s;
@@ -147,17 +168,56 @@ function freshState(){return{nextWorkout:"A",weights:{...DEFAULT_WEIGHTS},
   history:[],workoutNumber:1,setupDone:false};}
 
 // ═══════════════════════════════════════════
-// STORAGE (localStorage — works in browser)
+// STORAGE (localStorage — profile-based)
 // ═══════════════════════════════════════════
-function save(st){try{localStorage.setItem(SKEY,JSON.stringify(st));return true;}catch(e){console.error(e);return false;}}
-function load(){try{const d=localStorage.getItem(SKEY);if(d){const p=JSON.parse(d);
-  return{...freshState(),...p,weights:{...DEFAULT_WEIGHTS,...(p.weights||{})},
-    failCounts:{...freshState().failCounts,...(p.failCounts||{})}};}
-  }catch(e){console.error(e);}return null;}
+const PROFILES_KEY="5x5-profiles";
+function getProfiles(){try{return JSON.parse(localStorage.getItem(PROFILES_KEY))||[];}catch{return[];}}
+function saveProfiles(list){localStorage.setItem(PROFILES_KEY,JSON.stringify(list));}
+let currentProfile="default";
+function profileKey(){return SKEY+"-"+currentProfile;}
+function save(st){try{localStorage.setItem(profileKey(),JSON.stringify(st));return true;}catch(e){console.error(e);return false;}}
+function load(){
+  // Try profile key first
+  try{const d=localStorage.getItem(profileKey());if(d){const p=JSON.parse(d);
+    return{...freshState(),...p,weights:{...DEFAULT_WEIGHTS,...(p.weights||{})},
+      failCounts:{...freshState().failCounts,...(p.failCounts||{})}};}
+  }catch(e){console.error(e);}
+  // Migrate from old non-profile key
+  if(currentProfile==="default"){
+    try{const d=localStorage.getItem(SKEY);if(d){const p=JSON.parse(d);
+      const migrated={...freshState(),...p,weights:{...DEFAULT_WEIGHTS,...(p.weights||{})},
+        failCounts:{...freshState().failCounts,...(p.failCounts||{})}};
+      localStorage.setItem(profileKey(),JSON.stringify(migrated));
+      return migrated;}}catch{}
+  }
+  return null;
+}
+function switchProfile(name){
+  currentProfile=name;S=load()||freshState();
+  view=S.setupDone?"home":"setup";exIdx=0;warmupIdx=0;setsLog=[];modal=null;summaryData=null;
+  render();
+}
+function createProfile(){
+  const name=prompt("Enter profile name:");
+  if(!name||!name.trim())return;
+  const clean=name.trim().toLowerCase().replace(/[^a-z0-9]/g,"-");
+  const profiles=getProfiles();
+  if(!profiles.includes(clean)){profiles.push(clean);saveProfiles(profiles);}
+  switchProfile(clean);
+}
+function deleteProfile(){
+  if(currentProfile==="default"){alert("Can't delete default profile");return;}
+  if(!confirm(`Delete profile "${currentProfile}" and all its data?`))return;
+  localStorage.removeItem(profileKey());
+  const profiles=getProfiles().filter(p=>p!==currentProfile);
+  saveProfiles(profiles);switchProfile("default");
+}
 
 // ═══════════════════════════════════════════
 // APP STATE
 // ═══════════════════════════════════════════
+// Ensure default profile exists
+{const p=getProfiles();if(!p.includes("default")){p.unshift("default");saveProfiles(p);}}
 let S=load()||freshState();
 let view="home",exIdx=0,warmupIdx=0,setsLog=[],modal=null,summaryData=null;
 let timerInterval=null,timerLeft=0,statusMsg="";
@@ -165,7 +225,62 @@ let timerInterval=null,timerLeft=0,statusMsg="";
 let mReps=5,mDiff="ok",mWt=0;
 
 function persist(){save(S);render();}
-function setView(v){view=v;render();}
+
+// ═══════════════════════════════════════════
+// NAVIGATION STACK (history API for back button)
+// ═══════════════════════════════════════════
+let navDepth=0; // Track how many states we've pushed
+function navPush(){navDepth++;history.pushState({d:navDepth},""," ");}
+function setView(v){
+  view=v;
+  if(v!=="home")navPush();
+  render();
+}
+
+function isWorkoutActive(){return view==="workout"||view==="summary";}
+
+// Save/load in-progress workout
+function saveProgress(){
+  if(!isWorkoutActive())return;
+  try{localStorage.setItem(profileKey()+"-progress",JSON.stringify({
+    exIdx,warmupIdx,setsLog,workout:S.nextWorkout,workoutNumber:S.workoutNumber,
+    view,timestamp:Date.now()
+  }));}catch{}
+}
+function loadProgress(){
+  try{const d=localStorage.getItem(profileKey()+"-progress");
+    if(!d)return null;const p=JSON.parse(d);
+    if(Date.now()-p.timestamp>4*60*60*1000){clearProgress();return null;}
+    return p;
+  }catch{return null;}
+}
+function clearProgress(){try{localStorage.removeItem(profileKey()+"-progress");}catch{}}
+
+// Handle back gesture / hardware back
+function handleBack(){
+  // 1. Any overlay modal open → close it
+  if(modal){
+    if(modal==="timer"){skipTimer();}
+    else{modal=null;}
+    navPush();render();return;
+  }
+  // 2. Workout or summary → save progress, go home
+  if(view==="workout"){saveProgress();view="home";navPush();render();return;}
+  if(view==="summary"){saveProgress();view="home";navPush();render();return;}
+  // 3. History/setup → go home
+  if(view==="history"||view==="setup"){view="home";navPush();render();return;}
+  // 4. Home → close app
+}
+
+window.addEventListener('popstate',e=>{
+  // Only intercept if we have states to unwind
+  if(navDepth>0){navDepth--;handleBack();}
+});
+
+// Refresh / close tab — save progress
+window.addEventListener('beforeunload',e=>{
+  if(isWorkoutActive()){saveProgress();}
+});
 
 // ═══════════════════════════════════════════
 // RENDER
@@ -191,6 +306,7 @@ function renderSetup(){
     <div style="text-align:center;margin-bottom:28px">
       <div class="logo">5×5</div>
       <h1>SET YOUR STARTING WEIGHTS</h1>
+      <p style="font-size:15px;color:#f97316;margin-bottom:4px">Profile: ${currentProfile}</p>
       <p style="font-size:15px;color:#777">New lifter? Use defaults. Returning? Enter a weight you can do for 10 reps.</p>
     </div>
     ${exs.map(ex=>`
@@ -223,6 +339,23 @@ function renderHome(){
       <div class="logo">5×5</div>
       <div class="subtitle">STRONGLIFTS</div>
     </div>
+    <!-- Profile selector -->
+    <div class="card" style="padding:12px 16px">
+      <div class="row">
+        <div style="flex:1">
+          <div class="label" style="margin-bottom:4px">PROFILE</div>
+          <select id="profileSelect" onchange="switchProfile(this.value)"
+            style="background:#1a1a1a;color:#f97316;border:1px solid #333;border-radius:8px;
+            padding:8px 12px;font-size:16px;font-weight:700;font-family:inherit;width:100%">
+            ${getProfiles().map(p=>`<option value="${p}" ${p===currentProfile?'selected':''}>${p}</option>`).join("")}
+          </select>
+        </div>
+        <div style="display:flex;gap:6px;margin-left:10px;align-items:flex-end">
+          <button class="btn ghost sm" onclick="createProfile()">+ NEW</button>
+          ${currentProfile!=="default"?`<button class="btn ghost sm red" onclick="deleteProfile()">DEL</button>`:""}
+        </div>
+      </div>
+    </div>
     <div class="card">
       <div class="label">NEXT WORKOUT</div>
       <div class="tag" style="margin-bottom:16px">Workout ${wk} — #${S.workoutNumber}</div>
@@ -244,7 +377,28 @@ function renderHome(){
       <p style="font-size:13px;color:#555;margin-top:8px;line-height:1.4">
         Warmup: bar only (&lt;100) • bar + 1 ramp (100-199) • bar + ramp sets (200+) • 60s warmup rest • 120s work rest • 3 fails = 10% deload</p>
     </div>
-    <button class="btn" onclick="startWorkout()">BEGIN WORKOUT</button>
+    ${(()=>{const p=loadProgress();if(p){
+      const sets=p.setsLog?p.setsLog.reduce((a,l)=>a+(l?.setsCompleted?.length||0),0):0;
+      const totalSets=EXERCISES[p.workout||S.nextWorkout].reduce((a,ex)=>a+SETS_REPS[ex].sets,0);
+      const mins=Math.round((Date.now()-p.timestamp)/60000);
+      const hrs=Math.floor(mins/60);
+      const ago=hrs>0?`${hrs}h ${mins%60}m`:`${mins}m`;
+      const pct=totalSets?Math.round(sets/totalSets*100):0;
+      return`
+        <div class="card" style="border:2px solid #f97316;position:relative;overflow:hidden">
+          <div style="position:absolute;top:0;left:0;height:4px;background:#f97316;width:${pct}%;border-radius:2px"></div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;margin-top:4px">
+            <div style="width:14px;height:14px;border-radius:50%;background:#f97316;animation:pulse 1.5s infinite"></div>
+            <span style="font-size:16px;font-weight:800;color:#f97316">WORKOUT IN PROGRESS</span>
+          </div>
+          <div style="font-size:15px;color:#ccc;margin-bottom:4px">Workout ${p.workout||S.nextWorkout} #${p.workoutNumber||S.workoutNumber}</div>
+          <div style="font-size:14px;color:#888">${sets}/${totalSets} working sets complete • ${ago} ago</div>
+          <button class="btn" style="margin-top:12px" onclick="startWorkout(true)">RESUME</button>
+          <button class="btn ghost" style="width:100%;margin-top:8px" onclick="clearProgress();render()">DISCARD</button>
+        </div>`;
+    } else {
+      return`<button class="btn" onclick="startWorkout(false)">BEGIN WORKOUT</button>`;
+    }})()}
     ${statusMsg?`<div class="status ${statusMsg.includes("!")?'ok':'info'}">${statusMsg}</div>`:""}
     <div style="text-align:center;margin-top:16px">
       <button class="btn ghost" onclick="setView('history')">HISTORY</button>
@@ -267,7 +421,14 @@ function renderHome(){
       :`<div style="text-align:center;margin-top:8px;font-size:13px;color:#444">Tip: Use Chrome menu → Install app to add to home screen</div>`}`;
 }
 
-function startWorkout(){exIdx=0;warmupIdx=0;setsLog=[];modal=null;view="workout";render();}
+function startWorkout(resume){
+  if(resume){
+    const p=loadProgress();
+    if(p){exIdx=p.exIdx||0;warmupIdx=p.warmupIdx||0;setsLog=p.setsLog||[];modal=null;
+      view="workout";navPush();render();return;}
+  }
+  exIdx=0;warmupIdx=0;setsLog=[];modal=null;view="workout";navPush();render();
+}
 
 // ═══════════════════════════════════════════
 // WORKOUT SCREEN
@@ -294,11 +455,25 @@ function renderWorkout(){
   else if(modal==="feedback")modalHtml=renderFeedbackModal(curEx,wc+1,ts,tr,workWt);
   else if(modal==="timer")modalHtml=renderTimerModal();
 
+  // Calculate overall progress
+  const totalWorkSets=exs.reduce((a,ex)=>a+SETS_REPS[ex].sets,0);
+  const doneSets=setsLog.reduce((a,l)=>a+(l?.setsCompleted?.length||0),0);
+  const pct=totalWorkSets?Math.round(doneSets/totalWorkSets*100):0;
+
   app().innerHTML=`
     ${modalHtml}
-    <div class="row" style="margin-bottom:20px">
-      <span class="tag">WORKOUT ${wk}</span>
-      <span style="font-size:16px;color:#555">#${S.workoutNumber}</span>
+    <div style="margin-bottom:16px">
+      <div class="row">
+        <div><span class="tag">WORKOUT ${wk}</span>
+          <div style="font-size:13px;color:#555;margin-top:2px">${currentProfile}</div></div>
+        <div style="text-align:right">
+          <span style="font-size:16px;color:#555">#${S.workoutNumber}</span>
+          <div style="font-size:13px;color:#888;margin-top:2px">${doneSets}/${totalWorkSets} sets</div>
+        </div>
+      </div>
+      <div style="margin-top:8px;height:6px;background:#1a1a1a;border-radius:3px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:${pct>=100?'#4ade80':'#f97316'};border-radius:3px;transition:width 0.3s"></div>
+      </div>
     </div>
     ${exs.map((ex,ei)=>{const{sets:ets,reps:etr}=SETS_REPS[ex],elog=setsLog[ei],
       edone=elog&&elog.setsCompleted.length>=ets,isCur=ei===exIdx,w=S.weights[ex],
@@ -324,9 +499,9 @@ function renderWorkout(){
 }
 
 function showWarmup(){const wk=S.nextWorkout,ex=EXERCISES[wk][exIdx],wt=S.weights[ex],ws=buildWarmup(wt,ex);
-  mWt=ws[warmupIdx].weight;modal="warmup";render();}
+  mWt=ws[warmupIdx].weight;modal="warmup";navPush();render();}
 function showFeedback(){const wk=S.nextWorkout,ex=EXERCISES[wk][exIdx];
-  mWt=S.weights[ex];mReps=SETS_REPS[ex].reps;mDiff="ok";modal="feedback";render();}
+  mWt=S.weights[ex];mReps=SETS_REPS[ex].reps;mDiff="ok";modal="feedback";navPush();render();}
 
 function renderWarmupModal(ex,si,num,total){
   return`<div class="overlay"><div class="modal">
@@ -366,22 +541,51 @@ function renderFeedbackModal(ex,setNum,totalSets,targetReps,weight){
   </div></div>`;}
 
 // ═══════════════════════════════════════════
+// WAKE LOCK & AUDIO CHIME
+// ═══════════════════════════════════════════
+let wakeLock=null;
+async function acquireWake(){
+  try{if('wakeLock' in navigator){wakeLock=await navigator.wakeLock.request('screen');}}catch(e){console.log('Wake lock failed',e);}
+}
+function releaseWake(){if(wakeLock){wakeLock.release().catch(()=>{});wakeLock=null;}}
+// Re-acquire on visibility change (Chrome releases it when tab hidden)
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&timerInterval)acquireWake();});
+
+function playChime(){
+  try{
+    const ctx=new(window.AudioContext||window.webkitAudioContext)();
+    // Two-tone chime: C5 then E5
+    [[523.25,0],[659.25,0.15]].forEach(([freq,delay])=>{
+      const osc=ctx.createOscillator(),gain=ctx.createGain();
+      osc.type='sine';osc.frequency.value=freq;
+      gain.gain.setValueAtTime(0.4,ctx.currentTime+delay);
+      gain.gain.exponentialRampToValueAtTime(0.01,ctx.currentTime+delay+0.4);
+      osc.connect(gain);gain.connect(ctx.destination);
+      osc.start(ctx.currentTime+delay);osc.stop(ctx.currentTime+delay+0.5);
+    });
+    setTimeout(()=>ctx.close(),1000);
+  }catch(e){console.log('Audio failed',e);}
+}
+
+// ═══════════════════════════════════════════
 // TIMER
 // ═══════════════════════════════════════════
 let timerSecs=0,timerLabel="",timerNext=null,timerOnDone=null;
 function startTimer(secs,label,next,onDone){
   timerSecs=secs;timerLeft=secs;timerLabel=label;timerNext=next;timerOnDone=onDone;
-  modal="timer";render();
+  modal="timer";navPush();render();
+  acquireWake();
   if(timerInterval)clearInterval(timerInterval);
   timerInterval=setInterval(()=>{
     timerLeft--;
     if(timerLeft<=0){clearInterval(timerInterval);timerInterval=null;
+      playChime();releaseWake();
       setTimeout(()=>{modal=null;if(timerOnDone)timerOnDone();render();},600);}
     render();
   },1000);
 }
 function skipTimer(){if(timerInterval)clearInterval(timerInterval);timerInterval=null;
-  modal=null;if(timerOnDone)timerOnDone();render();}
+  releaseWake();modal=null;if(timerOnDone)timerOnDone();render();}
 
 function renderTimerModal(){
   const pct=((timerSecs-timerLeft)/timerSecs)*100,done=timerLeft<=0;
@@ -420,10 +624,12 @@ function doneWarmup(){
   if(next>=ws.length){
     const log=setsLog[exIdx]||{name:curEx,weight:wt,setsCompleted:[],difficulties:[],warmupSets:ws,warmupDone:false};
     log.warmupDone=true;setsLog[exIdx]=log;warmupIdx=0;
+    saveProgress();
     const ni={exercise:curEx,weight:wt,reps:tr,setLabel:`Working Set 1/${ts}`};
     startTimer(REST_WORK,"REST",ni,()=>{modal=null;showFeedback();});
   } else {
     warmupIdx=next;const nw=ws[next];
+    saveProgress();
     const ni={exercise:curEx,weight:nw.weight,reps:nw.reps,setLabel:`Warmup ${next+1}/${ws.length}`};
     startTimer(REST_WARMUP,"WARMUP REST",ni,()=>{modal=null;showWarmup();});
   }
@@ -438,6 +644,7 @@ function logWorkSet(){
   const log=setsLog[exIdx]||{name:curEx,weight:effectiveWt,setsCompleted:[],difficulties:[],warmupSets:ws,warmupDone:true};
   log.setsCompleted.push(mReps);log.difficulties.push(mDiff);log.weight=effectiveWt;log.warmupDone=true;log.warmupSets=ws;
   setsLog[exIdx]=log;
+  saveProgress(); // Auto-save in case of accidental exit
   modal=null;
   const nc=log.setsCompleted.length,last=nc>=ts,lastEx=exIdx>=exs.length-1;
   if(last&&lastEx){
@@ -498,7 +705,7 @@ function finishWorkout(){
   S.nextWorkout=S.nextWorkout==="A"?"B":"A";S.workoutNumber++;
   S.history.push(summaryData);summaryData=null;
   statusMsg="Workout saved!";setTimeout(()=>{statusMsg="";render();},3000);
-  view="home";persist();
+  clearProgress();view="home";persist();
 }
 
 // ═══════════════════════════════════════════
@@ -547,6 +754,7 @@ function installApp(){
 // ═══════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════
+history.replaceState({d:0},""," "); // Base state — back from here closes app
 render();
 </script>
 </body>
