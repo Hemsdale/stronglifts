@@ -165,7 +165,58 @@ function buildWarmup(wt,ex){
   [5,3,2].forEach((r,i)=>{if(pk[i])s.push({weight:pk[i],reps:r});});return s;}
 function freshState(){return{nextWorkout:"A",weights:{...DEFAULT_WEIGHTS},
   failCounts:{Squat:0,"Bench Press":0,"Barbell Row":0,"Overhead Press":0,Deadlift:0},
-  history:[],workoutNumber:1,setupDone:false};}
+  history:[],workoutNumber:1,setupDone:false,lastWorkoutDate:null,deloadDismissed:null};}
+
+// ═══════════════════════════════════════════
+// TIME-OFF DELOAD
+// ═══════════════════════════════════════════
+function daysSinceLastWorkout(){
+  // Check lastWorkoutDate first, fall back to last history entry
+  const d=S.lastWorkoutDate||(S.history.length?S.history[S.history.length-1].date:null);
+  if(!d)return 0;
+  const last=new Date(d),now=new Date();
+  return Math.floor((now-last)/(1000*60*60*24));
+}
+function suggestedDeloadPct(){
+  const days=daysSinceLastWorkout();
+  if(days<7)return 0;
+  if(days<=14)return 10;
+  if(days<=21)return 15;
+  if(days<=42)return 20;
+  return 30;
+}
+function calcDeloadWeights(pct){
+  const result={};
+  Object.keys(S.weights).forEach(ex=>{
+    const reduced=r5(S.weights[ex]*(1-pct/100));
+    // Don't go below defaults
+    result[ex]=Math.max(reduced,DEFAULT_WEIGHTS[ex]);
+  });
+  return result;
+}
+function needsDeload(){
+  if(!S.setupDone||!S.lastWorkoutDate)return false;
+  // Don't show if already dismissed for this return
+  if(S.deloadDismissed===today())return false;
+  return daysSinceLastWorkout()>=7;
+}
+let deloadPct=-1; // -1 = unset, will be initialized from suggestion
+function applyDeload(){
+  const pct=deloadPct;
+  const newWts=calcDeloadWeights(pct);
+  Object.keys(newWts).forEach(ex=>{S.weights[ex]=newWts[ex];});
+  Object.keys(S.failCounts).forEach(ex=>{S.failCounts[ex]=0;});
+  S.deloadDismissed=today();
+  deloadPct=-1;
+  statusMsg=`Deloaded ${pct}% — welcome back!`;
+  setTimeout(()=>{statusMsg="";render();},4000);
+  persist();
+}
+function skipDeload(){
+  S.deloadDismissed=today();
+  deloadPct=-1;
+  persist();
+}
 
 // ═══════════════════════════════════════════
 // STORAGE (localStorage — profile-based)
@@ -356,6 +407,52 @@ function renderHome(){
         </div>
       </div>
     </div>
+    ${(()=>{
+      if(!needsDeload())return"";
+      const days=daysSinceLastWorkout();
+      const sug=suggestedDeloadPct();
+      if(deloadPct<0)deloadPct=sug;
+      const preview=calcDeloadWeights(deloadPct);
+      const weeks=Math.floor(days/7);
+      const daysRem=days%7;
+      const agoStr=weeks>0?(daysRem>0?`${weeks}w ${daysRem}d`:`${weeks}w`):`${days}d`;
+      return`
+        <div class="card" style="border:2px solid #60a5fa;position:relative;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <span style="font-size:28px">👋</span>
+            <div>
+              <div style="font-size:18px;font-weight:800;color:#60a5fa">WELCOME BACK</div>
+              <div style="font-size:14px;color:#888">${agoStr} since last workout</div>
+            </div>
+          </div>
+          <p style="font-size:14px;color:#aaa;line-height:1.5;margin-bottom:12px">
+            A break of ${days} days means some strength loss is normal. A small deload helps you ease back in safely and rebuild momentum.</p>
+          <div style="margin-bottom:12px">
+            <div class="row">
+              <span style="font-size:15px;color:#ccc;font-weight:700">Deload: ${deloadPct}%</span>
+              <span style="font-size:13px;color:#666">(suggested: ${sug}%)</span>
+            </div>
+            <input type="range" min="0" max="50" step="5" value="${deloadPct}"
+              oninput="deloadPct=parseInt(this.value);render()"
+              style="width:100%;margin:8px 0;accent-color:#60a5fa">
+            <div class="row" style="font-size:12px;color:#555"><span>0%</span><span>50%</span></div>
+          </div>
+          <div style="background:#0d0d0d;border-radius:8px;padding:12px;margin-bottom:12px">
+            <div class="label" style="margin-bottom:8px">PREVIEW WEIGHTS</div>
+            ${Object.keys(S.weights).map(ex=>{
+              const cur=S.weights[ex],nw=preview[ex],changed=cur!==nw;
+              return`<div class="row" style="font-size:14px">
+                <span style="color:#aaa">${ex}</span>
+                <div>${changed
+                  ?`<span style="color:#555;text-decoration:line-through;margin-right:8px">${cur}</span><span style="color:#60a5fa;font-weight:700">${nw} lb</span>`
+                  :`<span style="color:#888">${cur} lb (no change)</span>`}
+                </div>
+              </div>`;}).join("")}
+          </div>
+          <button class="btn" style="background:#60a5fa" onclick="applyDeload()">ACCEPT DELOAD</button>
+          <button class="btn ghost" style="width:100%;margin-top:8px" onclick="skipDeload()">SKIP — TRAIN AT CURRENT WEIGHTS</button>
+        </div>`;
+    })()}
     <div class="card">
       <div class="label">NEXT WORKOUT</div>
       <div class="tag" style="margin-bottom:16px">Workout ${wk} — #${S.workoutNumber}</div>
@@ -703,6 +800,7 @@ function finishWorkout(){
       if(S.failCounts[ex.name]>=MAX_FAILS){S.weights[ex.name]=r5(S.weights[ex.name]*DELOAD);S.failCounts[ex.name]=0;}}
   });
   S.nextWorkout=S.nextWorkout==="A"?"B":"A";S.workoutNumber++;
+  S.lastWorkoutDate=today();S.deloadDismissed=null;
   S.history.push(summaryData);summaryData=null;
   statusMsg="Workout saved!";setTimeout(()=>{statusMsg="";render();},3000);
   clearProgress();view="home";persist();
