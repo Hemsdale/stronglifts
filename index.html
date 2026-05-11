@@ -8,9 +8,7 @@
 <meta name="theme-color" content="#0a0a0a">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>5×5 Tracker</title>
-<link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
-<link rel="apple-touch-icon" href="icon-192.png">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0a0a0a;color:#f4f4f4;font-family:'JetBrains Mono','SF Mono','Fira Code',monospace;
@@ -125,7 +123,7 @@ const EXERCISES={A:["Squat","Bench Press","Barbell Row"],B:["Squat","Overhead Pr
 const SETS_REPS={Squat:{sets:5,reps:5},"Bench Press":{sets:5,reps:5},"Barbell Row":{sets:5,reps:5},"Overhead Press":{sets:5,reps:5},Deadlift:{sets:1,reps:5}};
 const INCREMENT={Squat:5,"Bench Press":5,"Barbell Row":5,"Overhead Press":5,Deadlift:10};
 const DEFAULT_WEIGHTS={Squat:45,"Bench Press":45,"Barbell Row":65,"Overhead Press":45,Deadlift:95};
-const BAR=45,DELOAD=0.9,MAX_FAILS=3,REST_WORK=120,REST_WARMUP=60,SKEY="5x5-tracker-data";
+const BAR=45,DELOAD=0.9,MAX_FAILS=3,REST_WORK=90,REST_WARMUP=45,SKEY="5x5-tracker-data";
 const RACK=[65,95,135,185,225,275,315,365,405,455,495];
 const DC={easy:"#4ade80",ok:"#f97316",hard:"#ef4444"};
 const DL={easy:"EASY",ok:"OK",hard:"HARD"};
@@ -497,7 +495,7 @@ function renderHome(){
       <div class="row"><span style="color:${DC.ok}">🟡 OK</span><span style="color:#aaa">Standard increment</span></div>
       <div class="row"><span style="color:${DC.hard}">🔴 HARD</span><span style="color:#aaa">Half increment</span></div>
       <p style="font-size:13px;color:#555;margin-top:8px;line-height:1.4">
-        Warmup: bar only (&lt;100) • bar + 1 ramp (100-199) • bar + ramp sets (200+) • 60s warmup rest • 120s work rest • 3 fails = 10% deload</p>
+        Warmup: bar only (&lt;100) • bar + 1 ramp (100-199) • bar + ramp sets (200+) • 45s warmup rest • 90s work rest • 3 fails = 10% deload</p>
     </div>
     ${(()=>{const p=loadProgress();if(p){
       const sets=p.setsLog?p.setsLog.reduce((a,l)=>a+(l?.setsCompleted?.length||0),0):0;
@@ -538,7 +536,7 @@ function renderHome(){
           </div>
         </div>`).join("")}
     </div>
-    <div style="text-align:center;margin-top:20px;font-size:13px;color:#333">Data saved to this browser automatically • v9</div>
+    <div style="text-align:center;margin-top:20px;font-size:13px;color:#333">Data saved locally on device • v10${isNative()?' (native)':' (web)'}</div>
     ${deferredInstall?`<button class="btn green" style="margin-top:12px" onclick="installApp()">INSTALL AS APP</button>`
       :`<div style="text-align:center;margin-top:8px;font-size:13px;color:#444">Tip: Use Chrome menu → Install app to add to home screen</div>`}`;
 }
@@ -705,20 +703,90 @@ function renderFeedbackModal(ex,setNum,totalSets,targetReps,weight){
   </div></div>`;}
 
 // ═══════════════════════════════════════════
-// WAKE LOCK & AUDIO CHIME
+// NATIVE: KEEP ALIVE, NOTIFICATIONS, HAPTICS
 // ═══════════════════════════════════════════
-let wakeLock=null;
-async function acquireWake(){
-  try{if('wakeLock' in navigator){wakeLock=await navigator.wakeLock.request('screen');}}catch(e){console.log('Wake lock failed',e);}
+const isNative=()=>!!window.Capacitor;
+let keepAliveAudio=null;
+
+// Keep screen on during workout via silent audio loop (works in background)
+function acquireWake(){
+  try{
+    if(isNative()&&window.Capacitor.Plugins.KeepAwake){
+      window.Capacitor.Plugins.KeepAwake.keepAwake();return;
+    }
+    // Fallback: silent audio keeps app alive in background
+    if(!keepAliveAudio){
+      const ctx=new(window.AudioContext||window.webkitAudioContext)();
+      const osc=ctx.createOscillator();const gain=ctx.createGain();
+      gain.gain.value=0.001;// Essentially silent
+      osc.connect(gain);gain.connect(ctx.destination);osc.start();
+      keepAliveAudio={ctx,osc};
+    }
+    if('wakeLock' in navigator){navigator.wakeLock.request('screen').catch(()=>{});}
+  }catch(e){console.log('Wake failed',e);}
 }
-function releaseWake(){if(wakeLock){wakeLock.release().catch(()=>{});wakeLock=null;}}
-// Re-acquire on visibility change (Chrome releases it when tab hidden)
+function releaseWake(){
+  try{
+    if(isNative()&&window.Capacitor.Plugins.KeepAwake){
+      window.Capacitor.Plugins.KeepAwake.allowSleep();
+    }
+    if(keepAliveAudio){
+      keepAliveAudio.osc.stop();keepAliveAudio.ctx.close();keepAliveAudio=null;
+    }
+    if('wakeLock' in navigator){}// Let GC handle it
+  }catch(e){}
+}
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&timerInterval)acquireWake();});
+
+// Schedule a native notification for timer end
+let pendingNotifId=null;
+async function scheduleTimerNotif(seconds,label){
+  try{
+    if(isNative()){
+      const {LocalNotifications}=window.Capacitor.Plugins;
+      const perms=await LocalNotifications.requestPermissions();
+      if(perms.display==='granted'){
+        await LocalNotifications.schedule({notifications:[{
+          title:'5×5 Timer',body:label+' complete — time to lift!',
+          id:9901,
+          schedule:{at:new Date(Date.now()+seconds*1000)},
+          sound:'chime.wav',
+          channelId:'timer',
+          actionTypeId:'timerDone',
+          extra:{action:'resumeWorkout'}
+        }]});
+        pendingNotifId=9901;
+      }
+    } else if('Notification' in window&&Notification.permission==='granted'){
+      // Web fallback — schedule via setTimeout (won't survive background)
+      pendingNotifId=setTimeout(()=>{
+        new Notification('5×5 Timer',{body:label+' complete — time to lift!',tag:'timer'});
+      },seconds*1000);
+    } else if('Notification' in window&&Notification.permission==='default'){
+      Notification.requestPermission();
+    }
+  }catch(e){console.log('Notif schedule failed',e);}
+}
+async function cancelTimerNotif(){
+  try{
+    if(isNative()&&pendingNotifId){
+      const {LocalNotifications}=window.Capacitor.Plugins;
+      await LocalNotifications.cancel({notifications:[{id:9901}]});
+    } else if(pendingNotifId){
+      clearTimeout(pendingNotifId);
+    }
+    pendingNotifId=null;
+  }catch(e){}
+}
 
 function playChime(){
   try{
+    // Haptic feedback
+    if(isNative()&&window.Capacitor.Plugins.Haptics){
+      window.Capacitor.Plugins.Haptics.vibrate({duration:500});
+    } else if(navigator.vibrate){navigator.vibrate([200,100,200]);}
+    // Audio chime
     const ctx=new(window.AudioContext||window.webkitAudioContext)();
-    // Two-tone chime: C5 then E5
     [[523.25,0],[659.25,0.15]].forEach(([freq,delay])=>{
       const osc=ctx.createOscillator(),gain=ctx.createGain();
       osc.type='sine';osc.frequency.value=freq;
@@ -732,24 +800,51 @@ function playChime(){
 }
 
 // ═══════════════════════════════════════════
-// TIMER
+// TIMER (timestamp-based — survives backgrounding)
 // ═══════════════════════════════════════════
 let timerSecs=0,timerLabel="",timerNext=null,timerOnDone=null;
+let timerEndTime=0; // Absolute timestamp when timer expires
 function startTimer(secs,label,next,onDone){
   timerSecs=secs;timerLeft=secs;timerLabel=label;timerNext=next;timerOnDone=onDone;
+  timerEndTime=Date.now()+secs*1000;
+  // Save timer state so it survives backgrounding
+  try{localStorage.setItem('5x5-active-timer',JSON.stringify({endTime:timerEndTime,label}));}catch{}
   modal="timer";navPush();render();
   acquireWake();
+  scheduleTimerNotif(secs,label);
   if(timerInterval)clearInterval(timerInterval);
   timerInterval=setInterval(()=>{
-    timerLeft--;
-    if(timerLeft<=0){clearInterval(timerInterval);timerInterval=null;
+    // Timestamp-based: immune to throttling
+    const remaining=Math.max(0,Math.ceil((timerEndTime-Date.now())/1000));
+    timerLeft=remaining;
+    if(remaining<=0){clearInterval(timerInterval);timerInterval=null;
+      cancelTimerNotif();
+      try{localStorage.removeItem('5x5-active-timer');}catch{}
       playChime();releaseWake();
       setTimeout(()=>{modal=null;if(timerOnDone)timerOnDone();render();},600);}
     render();
-  },1000);
+  },250); // Check 4x/sec for responsive UI even after backgrounding
 }
-function skipTimer(){if(timerInterval)clearInterval(timerInterval);timerInterval=null;
+function skipTimer(){
+  if(timerInterval)clearInterval(timerInterval);timerInterval=null;
+  cancelTimerNotif();
+  try{localStorage.removeItem('5x5-active-timer');}catch{}
   releaseWake();modal=null;if(timerOnDone)timerOnDone();render();}
+
+// On app resume: check if timer expired while backgrounded
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'&&timerEndTime>0){
+    const remaining=Math.ceil((timerEndTime-Date.now())/1000);
+    if(remaining<=0&&timerInterval){
+      // Timer expired while backgrounded — trigger completion
+      clearInterval(timerInterval);timerInterval=null;
+      timerLeft=0;timerEndTime=0;
+      try{localStorage.removeItem('5x5-active-timer');}catch{}
+      playChime();releaseWake();
+      setTimeout(()=>{modal=null;if(timerOnDone)timerOnDone();render();},300);
+    }
+  }
+});
 
 function renderTimerModal(){
   const pct=((timerSecs-timerLeft)/timerSecs)*100,done=timerLeft<=0;
@@ -918,15 +1013,67 @@ function renderHistory(){
 }
 
 // ═══════════════════════════════════════════
-// PWA: Service Worker + Install Prompt
+// NATIVE APP INIT (Capacitor)
 // ═══════════════════════════════════════════
-if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('sw.js').catch(e=>console.log('SW reg failed',e));
+if(isNative()){
+  // Handle notification tap — return to workout
+  try{
+    const {LocalNotifications}=window.Capacitor.Plugins;
+    LocalNotifications.createChannel({id:'timer',name:'Workout Timer',
+      description:'Rest timer notifications',importance:4,sound:'chime.wav',
+      vibration:true,lights:true,lightColor:'#f97316'});
+    LocalNotifications.addListener('localNotificationActionPerformed',()=>{
+      // User tapped notification — make sure we're on workout screen
+      if(view!=='workout'){view='workout';render();}
+    });
+  }catch(e){console.log('Notif init failed',e);}
+
+  // Handle hardware back button via Capacitor App plugin
+  try{
+    const {App:CapApp}=window.Capacitor.Plugins;
+    CapApp.addListener('backButton',({canGoBack})=>{handleBack();});
+    CapApp.addListener('appStateChange',({isActive})=>{
+      if(isActive&&timerEndTime>0){
+        // App resumed — check timer
+        const remaining=Math.ceil((timerEndTime-Date.now())/1000);
+        if(remaining<=0){
+          if(timerInterval){clearInterval(timerInterval);timerInterval=null;}
+          timerLeft=0;timerEndTime=0;
+          try{localStorage.removeItem('5x5-active-timer');}catch{}
+          playChime();releaseWake();
+          setTimeout(()=>{modal=null;if(timerOnDone)timerOnDone();render();},300);
+        } else {
+          timerLeft=remaining;render();
+        }
+      }
+    });
+  }catch(e){console.log('App plugin init failed',e);}
+
+  // Status bar
+  try{
+    const {StatusBar}=window.Capacitor.Plugins;
+    StatusBar.setBackgroundColor({color:'#0a0a0a'});
+    StatusBar.setStyle({style:'DARK'});
+  }catch(e){}
+
+  // Request notification permission on first launch
+  try{
+    const {LocalNotifications}=window.Capacitor.Plugins;
+    LocalNotifications.requestPermissions();
+  }catch(e){}
+} else {
+  // Web fallback: service worker for offline support
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('sw.js').catch(e=>console.log('SW reg failed',e));
+  }
+  // Request web notification permission
+  if('Notification' in window&&Notification.permission==='default'){
+    Notification.requestPermission();
+  }
 }
 let deferredInstall=null;
 window.addEventListener('beforeinstallprompt',e=>{
   e.preventDefault();deferredInstall=e;
-  // Show install banner on home screen
   setTimeout(()=>{if(view==="home")render();},500);
 });
 function installApp(){
